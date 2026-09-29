@@ -1,6 +1,7 @@
 #include "server.h"
 #include "http.h"
 #include "pool_server.h"
+#include "logger.h"
 
 #include <stdio.h>   /* printf / fprintf */
 #include <stdlib.h>  /* atoi / exit */
@@ -26,6 +27,11 @@ int main(int argc, char* argv[])
         exit(EXIT_FAILURE);
     }
 
+    /* 初始化日志系统: NULL 表示用默认路径(access.log / error.log, 在进程 cwd)。
+     * 打开失败也不退出 —— 日志不该成为服务起不来的原因。 */
+    if (log_init(NULL, NULL) == -1)
+        fprintf(stderr, "警告: 日志文件打开失败, 本次运行不会有日志\n");
+
     int threads = (argc >= 4) ? atoi(argv[3]) : 0;
     if (threads > 0)
     {
@@ -40,5 +46,6 @@ int main(int argc, char* argv[])
         epollRun(port);
     }
 
+    log_close();   /* 冲刷并关闭日志文件 */
     return 0;
 }

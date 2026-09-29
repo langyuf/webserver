@@ -4,6 +4,7 @@
 
 #include "server.h"
 #include "http.h"
+#include "logger.h"
 
 #include <stdio.h>       /* printf / fprintf / perror */
 #include <stdlib.h>      /* exit */
@@ -15,6 +16,19 @@
 #include <arpa/inet.h>   /* sockaddr_in / htons / INADDR_ANY */
 #include <sys/socket.h>  /* socket / bind / listen / accept */
 #include <sys/epoll.h>   /* epoll_create / epoll_ctl / epoll_wait */
+
+/* =====================================================================
+ *  退出信号处理
+ *  信号处理函数里只置一个标志, 不做任何 I/O —— 因为 Logger 内部用了
+ *  互斥锁和 ofstream, 都不是"异步信号安全"的, 在信号上下文里调用可能死锁。
+ * ===================================================================== */
+static volatile sig_atomic_t g_stop = 0;
+
+static void on_signal(int sig)
+{
+    (void)sig;
+    g_stop = 1;
+}
 
 static int set_nonblocking(int fd){
     int flags = fcntl(fd, F_GETFL, 0);
@@ -61,15 +75,17 @@ int InitListen(unsigned short port){
 }
 void new_connection(int lfd,int epfd){
     while(1){
-        int cfd = accept(lfd, NULL, NULL);
+        struct sockaddr_in peer;
+        socklen_t peerlen = sizeof(peer);
+        int cfd = accept(lfd, (struct sockaddr*)&peer, &peerlen);
         if (cfd == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;/* 没有更多连接，正常退出循环 */
             if (errno == EINTR)continue; /* EINTR：被信号打断，重试 */
-            perror("accept");
+            log_error("accept 失败: %s", strerror(errno));
             break;
         }
         if(set_nonblocking(cfd)==-1){
-            perror("set_nonblocking cfd");
+            log_error("set_nonblocking 失败 fd=%d: %s", cfd, strerror(errno));
             close(cfd);
             continue;
         }
@@ -84,7 +100,10 @@ void new_connection(int lfd,int epfd){
             close(cfd);
             continue;
         }
-        printf("新客户端接入: fd=%d\n", cfd);
+        /* 【日志点 1/4 · accept】记录新接入的连接 */
+        char ip[INET_ADDRSTRLEN] = {0};
+        inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+        log_info("accept fd=%d 来自 %s:%d", cfd, ip, ntohs(peer.sin_port));
     }
 }
 
@@ -93,14 +112,28 @@ int epollRun(unsigned short port){
 
     // 兜底: 若 main() 未指定根目录, 则用当前工作目录
     if(http_root() == NULL && http_init(NULL) == -1){
+        log_error("http_init 失败: 根目录未设置");
         fprintf(stderr, "http_init 失败\n");
         exit(0);
     }
     printf("HTTP 服务已就绪, 根目录: %s, 端口: %u\n", http_root(), port);
+    log_info("服务器启动: 模式=epoll(单线程) 端口=%u 根目录=%s", port, http_root());
+
+    /* 安装退出信号处理。不设 SA_RESTART: 这样 epoll_wait 会返回 EINTR,
+     * 主循环才能看到 g_stop 并优雅收尾。 */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
     //创建epoll模型
     int epfd = epoll_create(100);
     if(epfd == -1)
     {
+        log_error("epoll_create 失败: %s", strerror(errno));
         perror("epoll_create");
         exit(0);
     }
@@ -111,6 +144,7 @@ int epollRun(unsigned short port){
     int re = epoll_ctl(epfd, EPOLL_CTL_ADD, lfd, &ev);
     if(re == -1)
     {
+        log_error("epoll_ctl 失败: %s", strerror(errno));
         perror("epoll_ctl");
         exit(0);
     }
@@ -118,12 +152,17 @@ int epollRun(unsigned short port){
     struct epoll_event evs[1024];
     int size = sizeof(evs) / sizeof(evs[0]);
     //不停的委托内核检测epoll模型中的文件描述符状态
-    while (1) 
+    while (!g_stop)
     {
         int num = epoll_wait(epfd, evs, size, -1);
+        if (num < 0) {
+            if (errno == EINTR) continue;   /* 被信号打断 -> 回到 while 判断 g_stop */
+            log_error("epoll_wait 失败: %s", strerror(errno));
+            break;
+        }
         printf("num = %d\n", num);
         // 遍历evs数组，个数就返回值
-        
+
         for(int i=0; i<num; ++i)
         {
             // 取出数组元素中的文件描述符
@@ -139,4 +178,9 @@ int epollRun(unsigned short port){
         }
     }
 
+    /* 【日志点 4/4 · 退出】 */
+    close(lfd);
+    close(epfd);
+    log_info("收到退出信号, 服务器已退出");
+    return 0;
 }

@@ -9,7 +9,7 @@
 #
 #  按扩展名分工, 不需要任何特殊开关:
 #      C   源码: main.c  server.c  http.c  client.c
-#      C++ 源码: TaskQueue.cpp  threadpool.cpp  pool_server.cpp
+#      C++ 源码: TaskQueue.cpp  threadpool.cpp  pool_server.cpp  logger.cpp
 #
 #  注意: 不要把全部源码交给一条 g++ 命令 —— g++ 会把 .c 当 C++ 编译,
 #  C 代码里 realloc/calloc 的隐式 void* 转换在 C++ 中是非法的,
@@ -23,7 +23,7 @@ CXXFLAGS = -std=c++11 -Wall -O2
 LDFLAGS  = -pthread
 
 C_OBJS   = main.o server.o http.o
-CXX_OBJS = TaskQueue.o threadpool.o pool_server.o
+CXX_OBJS = TaskQueue.o threadpool.o pool_server.o logger.o
 TARGET   = s
 
 HEADERS  = $(wildcard *.h)

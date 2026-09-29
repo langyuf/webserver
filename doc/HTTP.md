@@ -53,14 +53,14 @@
 
 | 层 | 行区间 | 内容 | 是否对外可见 |
 | --- | --- | --- | --- |
-| ① 配置 / 状态 | 27 ~ 69 | 宏、`http_conn_t`、全局变量、连接表锁 | 内部 |
-| ② 动态缓冲 | 71 ~ 116 | `buf_t` 与三个操作函数 | 内部 |
-| ③ 工具函数 | 118 ~ 311 | 时间、状态码、MIME、转义、URL、请求头解析 | 内部 |
-| ④ 连接管理 | 313 ~ 415 | 状态机、读、写、关闭、复位 | 内部 |
-| ⑤ 响应构造 | 417 ~ 610 | 响应头拼装、错误页、目录列表、文件发送 | 内部 |
-| ⑥ 请求处理 | 612 ~ 731 | `process_request()` 总调度 | 内部 |
-| ⑦ 对外接口 | 733 ~ 837 | `http_init` / `http_handle` 等 | **公开** |
-| ⑧ 阻塞式接口 | 839 ~ 880 | `http_serve_connection()`（供线程池使用），见第 9 节 | **公开** |
+| ① 配置 / 状态 | 28 ~ 70 | 宏、`http_conn_t`、全局变量、连接表锁 | 内部 |
+| ② 动态缓冲 | 72 ~ 117 | `buf_t` 与三个操作函数 | 内部 |
+| ③ 工具函数 | 119 ~ 312 | 时间、状态码、MIME、转义、URL、请求头解析 | 内部 |
+| ④ 连接管理 | 314 ~ 418 | 状态机、读、写、关闭、复位 | 内部 |
+| ⑤ 响应构造 | 420 ~ 618 | 响应头拼装、错误页、目录列表、文件发送 | 内部 |
+| ⑥ 请求处理 | 620 ~ 744 | `process_request()` 总调度 | 内部 |
+| ⑦ 对外接口 | 746 ~ 858 | `http_init` / `http_handle` 等 | **公开** |
+| ⑧ 阻塞式接口 | 860 ~ 904 | `http_serve_connection()`（供线程池使用），见第 9 节 | **公开** |
 
 对外只有 5 个函数，其余 29 个函数一律 `static`，链接期不会污染符号表
 （可以用 `nm http.o` 验证：只有 `http_init` / `http_handle` / `http_root` /
@@ -131,7 +131,7 @@
 
 #### `void http_set_verbose(int on)` —— 第 46 行
 
-访问日志开关，默认开。关掉后 `conn_finish()` 里那行 `printf` 不再执行。
+访问日志开关，默认开。关掉后 `conn_finish()` 里那行 `log_info()` 不再执行。
 
 #### `const char *http_root(void)` —— 第 49 行
 
@@ -161,7 +161,7 @@
 
 ## 4. `http.c` 详解
 
-### 4.1 `_GNU_SOURCE` 与头文件（第 5 ~ 25 行）
+### 4.1 `_GNU_SOURCE` 与头文件（第 5 ~ 26 行）
 
 ```c
 #define _GNU_SOURCE      /* 必须在所有 #include 之前 */
@@ -179,7 +179,7 @@
 `MSG_NOSIGNAL` 的作用是让 `send()` 在对方已关闭时不触发 `SIGPIPE`
 （模块没有依赖进程级 `signal(SIGPIPE, SIG_IGN)`，更自洽）。
 
-### 4.2 常量（第 27 ~ 28 行）
+### 4.2 常量（第 28 ~ 29 行）
 
 | 宏 | 值 | 语义 | 超出时的行为 |
 | --- | --- | --- | --- |
@@ -191,7 +191,7 @@
 
 ### 4.3 数据结构
 
-#### 4.3.1 状态枚举（第 33 行）
+#### 4.3.1 状态枚举（第 34 行）
 
 ```c
 typedef enum { ST_READING = 0, ST_SENDING } http_state_t;
@@ -205,7 +205,7 @@ typedef enum { ST_READING = 0, ST_SENDING } http_state_t;
 因为 `input` 永远只可能是"一个请求"，不需要 `ST_PARSING` 这种中间态——
 解析是在同一函数调用里一次做完的（`process_request` 是纯计算，不阻塞）。
 
-#### 4.3.2 `http_conn_t`（第 35 ~ 56 行）—— 每个连接一份状态
+#### 4.3.2 `http_conn_t`（第 36 ~ 57 行）—— 每个连接一份状态
 
 | 字段 | 类型 | 含义 | 何时写入 |
 | --- | --- | --- | --- |
@@ -233,7 +233,7 @@ typedef enum { ST_READING = 0, ST_SENDING } http_state_t;
    `sendfile` 返回 `EAGAIN` 时**什么都不用记住**，下次事件进来接着调即可——
    这是"无栈式"续传的关键，也是为什么不需要为每个连接分配输出缓冲。
 
-#### 4.3.3 `buf_t` 动态缓冲（第 74 ~ 116 行）
+#### 4.3.3 `buf_t` 动态缓冲（第 75 ~ 117 行）
 
 ```c
 typedef struct { char *p; size_t len, cap; } buf_t;
@@ -244,25 +244,25 @@ typedef struct { char *p; size_t len, cap; } buf_t;
 
 | 函数 | 行 | 行为 | 失败条件 |
 | --- | --- | --- | --- |
-| `buf_reserve(b, extra)` | 70 | 保证还能塞下 `extra` 字节，容量不足则 `realloc` 倍增 | 超过 `HTTP_HDR_MAX` 或 `realloc` 失败 → `-1` |
-| `buf_add(b, s, n)` | 83 | 追加 `n` 字节并补 `'\0'` | 同上 |
-| `buf_puts(b, s)` | 93 | `buf_add` 的 `strlen` 包装 | 同上 |
-| `buf_printf(b, fmt, ...)` | 95 | `printf` 风格追加 | 同上 |
+| `buf_reserve(b, extra)` | 71 | 保证还能塞下 `extra` 字节，容量不足则 `realloc` 倍增 | 超过 `HTTP_HDR_MAX` 或 `realloc` 失败 → `-1` |
+| `buf_add(b, s, n)` | 84 | 追加 `n` 字节并补 `'\0'` | 同上 |
+| `buf_puts(b, s)` | 94 | `buf_add` 的 `strlen` 包装 | 同上 |
+| `buf_printf(b, fmt, ...)` | 96 | `printf` 风格追加 | 同上 |
 
-`buf_printf` 有个小技巧（第 101 ~ 116 行）：**先用栈上的 `tmp[1024]` 试写**，
+`buf_printf` 有个小技巧（第 102 ~ 117 行）：**先用栈上的 `tmp[1024]` 试写**，
 如果一次装得下就直接 `buf_add`；装不下才第二次 `vsnprintf`，直接写进扩容后的
 目标缓冲。这样绝大多数调用（都是一两百字节）不会触发 `realloc`。
 需要注意第二次 `vsnprintf` 前要**重新 `va_start`**，因为 `va_list` 已被消耗。
 
 > ⚠️ 已知取舍：`buf_reserve` 在超过 `HTTP_HDR_MAX` 时返回 `-1`，
 > 上层 `buf_add` / `buf_puts` 会把 `-1` 一路传上来。但
-> `resp_dir_listing()`（第 488 行）**没有检查这些返回值**——
+> `resp_dir_listing()`（第 496 行）**没有检查这些返回值**——
 > 目录文件很多导致列表 HTML 超过 8 KB 时，页面会被静默截断
 > （`Content-Length` 与截断后的实际长度仍然一致，所以不是协议错误，
 > 只是内容不全）。目录很大时应调大 `HTTP_HDR_MAX`，或改为检查返回值后
 > 返回 `500`。
 
-#### 4.3.4 连接表（第 59 ~ 69 行 + 766 行）
+#### 4.3.4 连接表（第 60 ~ 70 行 + 766 行）
 
 ```c
 static http_conn_t **g_conn   = NULL;   /* 以 fd 为下标的指针数组 */
@@ -271,7 +271,7 @@ static int           g_conn_cap = 0;    /* 数组容量 */
 
 选型理由：`epoll` 事件天然带 `fd`，用 `fd` 直接下标是 **O(1)**，
 比哈希表简单得多，也不需要引入任何依赖。代价是数组长度要跟得上
-`fd` 取值，所以 `conn_get()`（第 766 行）做了惰性扩容：
+`fd` 取值，所以 `conn_get()`（第 779 行）做了惰性扩容：
 
 ```c
 int ncap = g_conn_cap ? g_conn_cap : 256;   /* 初值 256 */
@@ -282,10 +282,10 @@ realloc(...); memset(新区域, 0, ...);        /* 新增部分必须清零 */
 `memset` 那一步是必须的——`realloc` 出来的新区域是垃圾值，
 不清零会把随机地址当成 `http_conn_t*` 用，直接段错误。
 
-**`g_conn_lock`（第 69 行）**：为了支持第 9 节的线程池模式，
+**`g_conn_lock`（第 70 行）**：为了支持第 9 节的线程池模式，
 连接表加了一把 `pthread_mutex_t`。加锁范围刻意做到最小——**只在
-"查表 / 建表项 / 扩容 / 摘链"这几步短暂持有**（`conn_get()` 第 766 行、
-`conn_unlink()` 第 328 行）。之所以不需要 per-connection 锁，是因为
+"查表 / 建表项 / 扩容 / 摘链"这几步短暂持有**（`conn_get()` 第 779 行、
+`conn_unlink()` 第 329 行）。之所以不需要 per-connection 锁，是因为
 **每个连接只交给一个线程处理**，连接状态本身不会跨线程访问。
 这把锁保护的是"表"这个数据结构，而不是表里的连接。
 
@@ -293,9 +293,9 @@ realloc(...); memset(新区域, 0, ...);        /* 新增部分必须清零 */
 所以本模块**不支持多目录 / 多实例**；要支持就得把它们塞进一个
 `http_server_t` 结构体，并把 `http_handle` 的第一个参数换成它。
 
-### 4.4 工具函数层（第 121 ~ 311 行）
+### 4.4 工具函数层（第 122 ~ 312 行）
 
-#### `http_date()` 121 · `status_text()` 128 · `mime_type()` 146
+#### `http_date()` 122 · `status_text()` 129 · `mime_type()` 147
 
 - `http_date()` 用 `gmtime_r` + `strftime` 生成 RFC 7231 要求的
   `Sun, 27 Sep 2026 09:28:05 GMT` 格式。**必须用 GMT**，不能用本地时间，
@@ -307,7 +307,7 @@ realloc(...); memset(新区域, 0, ...);        /* 新增部分必须清零 */
   30 种常见类型，未命中则 `application/octet-stream`。
   `text/*` 一律带 `; charset=utf-8`，否则中文文件名页面在浏览器里会乱码。
 
-#### 转义三兄弟：`html_escape()` 188 · `url_encode()` 203 · `url_decode()` 221
+#### 转义三兄弟：`html_escape()` 189 · `url_encode()` 204 · `url_decode()` 222
 
 这三个函数解决的是**两个方向的编码问题**，很容易混淆：
 
@@ -328,7 +328,7 @@ if (o + 1 >= outsz) return -1;                              /* 输出溢出 */
 `%00` 那一行特别关键：如果放任 `\0` 进入路径，后续 `snprintf`/`strlen`
 会在那里截断，攻击者就能用 `safe%00/../../etc/passwd` 之类手法绕过检查。
 
-#### `sanitize_rel()` 242 —— 路径规范化
+#### `sanitize_rel()` 243 —— 路径规范化
 
 把 URL 路径压成 `/a/b` 形式的相对路径，同时**拒绝任何 `..` 段**：
 
@@ -342,11 +342,11 @@ if (o == 0) out[o++] = '/';                  /* 空路径归一为 "/" */
 它不是简单的 `strstr(path, "..")`——那样会误杀 `..foo.txt` 这种正常文件名。
 按段处理才是正确的。
 
-#### `header_get()` 268 —— 取请求头字段
+#### `header_get()` 269 —— 取请求头字段
 
 从请求缓冲里按名字取一个头的值，**大小写不敏感**。实现要点：
 
-- 从**第一个 `'\n'` 之后**开始扫（第 271 ~ 273 行的 `strchr(req,'\n')`），
+- 从**第一个 `'\n'` 之后**开始扫（第 272 ~ 274 行的 `strchr(req,'\n')`），
   这样不会把请求行里的内容误当成头；
 - 只在**行首**匹配 `name:`，所以 `X-Connection:` 不会命中 `Connection`；
 - 逐行处理，遇到空行（去掉 `\r` 后长度为 0）就停止——头部结束；
@@ -354,7 +354,7 @@ if (o == 0) out[o++] = '/';                  /* 空路径归一为 "/" */
 
 返回值是 `1/0`，值通过出参返回，缓冲区由调用方提供。
 
-#### `find_header_end()` 296 —— 判断"请求头收全了没"
+#### `find_header_end()` 297 —— 判断"请求头收全了没"
 
 这是 ET 模式下**最核心的一个判断**。因为 `recv` 是流式的，一个请求
 可能被拆成多个 TCP 段到达，必须能判断"我手上的字节是否已经构成完整头部"。
@@ -370,12 +370,12 @@ return 0;   /* 0 = 还没收全 */
 同时通过出参 `has_body` 告诉调用方"头部之后还有字节"（即请求体或流水线请求），
 返回值 `0` 被复用作"未找到"的哨兵值——因为合法的头部结束位置至少是 2。
 
-### 4.5 连接管理层（第 316 ~ 415 行）
+### 4.5 连接管理层（第 317 ~ 418 行）
 
 这 5 个函数构成状态机的全部动作。返回值约定贯穿始终：
 **`1` = 还需继续，`0` = 完成，`-1` = 出错**（`conn_read` 多一个 `-2`）。
 
-#### `conn_want_write()` 316 —— 切换兴趣到"只关心可写"
+#### `conn_want_write()` 317 —— 切换兴趣到"只关心可写"
 
 ```c
 ev.events = EPOLLOUT | EPOLLET | EPOLLRDHUP;   /* 注意：没有 EPOLLIN */
@@ -390,7 +390,7 @@ epoll_ctl(c->epfd, EPOLL_CTL_MOD, c->fd, &ev);
    边沿触发——这是 ET 编程的标准手法。配合 `conn_finish()` 里再次
    `MOD` 回 `EPOLLIN`，就实现了"读一段 → 写一段 → 读一段"的往返切换。
 
-#### `conn_unlink()` 328 / `conn_close()` 340 —— 资源释放点
+#### `conn_unlink()` 329 / `conn_close()` 341 —— 资源释放点
 
 释放被拆成了两个函数，公共部分在下层：
 
@@ -429,14 +429,14 @@ static void conn_close(http_conn_t *c)                      /* epoll 模式专�
    释放自己的结构体不需要保护，缩短临界区。
 3. 模块里所有错误路径最终都汇聚到 `conn_unlink()`，所以不存在资源泄漏的分支。
 
-#### `conn_finish()` 348 —— 响应发完后的收尾
+#### `conn_finish()` 349 —— 响应发完后的收尾
 
 ```c
 if (c->file_fd >= 0) { close(c->file_fd); c->file_fd = -1; }
 free(c->hdr); c->hdr = NULL; c->hdr_len = c->hdr_sent = 0;
 c->file_off = c->file_remain = 0;
 
-if (g_verbose) printf("[http] %s %s -> %d%s\n", ...);   /* 访问日志 */
+if (g_verbose) log_info("%s %s -> %d%s", ...);   /* 访问日志点 */
 
 if (!c->keep_alive) return -1;      /* 让调用方去 conn_close */
 
@@ -454,7 +454,7 @@ epoll_ctl(c->epfd, EPOLL_CTL_MOD, c->fd, &ev);          /* 重新武装 ET */
 日志打印在这里而不是请求处理处，好处是**记录的是实际完成的结果**，
 而且天然只打一次。
 
-#### `conn_flush()` 377 —— 非阻塞发送，两段式
+#### `conn_flush()` 380 —— 非阻塞发送，两段式
 
 ```c
 while (c->hdr_sent < c->hdr_len) {          /* 第一段：响应头（+小响应体） */
@@ -488,7 +488,7 @@ return 0;
 `sendfile` 返回 `0` 却还有 `file_remain` 的情况理论上是"文件被截断了"，
 这里直接 `break` 结束（宁可少发也不会死循环）。
 
-#### `conn_read()` 397 —— ET 模式下的读取
+#### `conn_read()` 400 —— ET 模式下的读取
 
 ```c
 for (;;) {
@@ -515,13 +515,13 @@ for (;;) {
 - **每读一块都补 `'\0'`**：这样 `sscanf` / `strchr` / `header_get` 才能直接
   按字符串处理，不用到处传长度。
 - **`-2` 是自定义的"恶意/异常"信号**，独立于 `-1`，因为调用方要对它
-  回 `413` 而不是直接关闭（见 `http_handle` 第 816 行）。
+  回 `413` 而不是直接关闭（见 `http_handle` 第 833 行）。
 
-### 4.6 响应构造层（第 420 ~ 610 行）
+### 4.6 响应构造层（第 423 ~ 618 行）
 
 这一层把"生成 HTTP 响应"拆成两个动作：**先拼进临时 `buf_t`，再移交**
 
-#### `resp_begin()` 420 —— 拼响应头和公共字段
+#### `resp_begin()` 423 —— 拼响应头和公共字段
 
 ```c
 c->status = code;                                    /* 供日志使用 */
@@ -538,7 +538,7 @@ Connection: keep-alive|close        /* 由 c->keep_alive 决定 */
 把 `Date` / `Server` / `Content-Length` / `Connection` 统一在这里出，
 保证**每个响应都不缺这些字段**，调用方只需关心业务相关的头。
 
-#### `resp_commit()` 437 —— 移交所有权，进入发送态
+#### `resp_commit()` 440 —— 移交所有权，进入发送态
 
 ```c
 free(c->hdr);                       /* 释放上一次的（若有） */
@@ -552,7 +552,7 @@ c->state   = ST_SENDING;            /* 状态机切换！ */
 调用方（比如 `resp_dir_listing`）在 `free(b.p)` 时就会**双重释放**。
 这就是为什么所有 `resp_*` 系列的调用方都只 `free(b.p)` 而不会出问题。
 
-#### `resp_memory()` 449 / `resp_error()` 459 —— 内存型响应
+#### `resp_memory()` 452 / `resp_error()` 462 —— 内存型响应
 
 ```c
 size_t send_len = c->head_only ? 0 : blen;      /* HEAD：只发头 */
@@ -568,13 +568,13 @@ resp_commit(c, &b, -1);                               /* file_fd = -1 */
 `resp_error()` 只是把状态码包进一段固定的 HTML 模板，再调 `resp_memory`。
 模板里的 `%s` 都是编译期常量（如 `"Not Found"`），不存在注入风险。
 
-#### `human_size()` 473 / `cmp_str()` 483
+#### `human_size()` 481 / `cmp_str()` 491
 
 - `human_size`：字节数格式化成 `1.0 KB` / `2.3 MB`，仅用于目录列表展示。
 - `cmp_str`：`qsort` 的比较器，让目录列表按名称排序（注：纯 `strcmp`，
   所以大写字母排在小写前；追求"文件管理器式"排序需要自己写比较逻辑）。
 
-#### `resp_dir_listing()` 488 —— 目录列表页
+#### `resp_dir_listing()` 496 —— 目录列表页
 
 流程：`opendir` → `readdir` 收集名字到 `char**`（跳过 `.` 和 `..`）
 → `qsort` → 逐项 `stat` 取类型/大小 → 拼 HTML → `resp_memory` → 释放。
@@ -588,11 +588,11 @@ resp_commit(c, &b, -1);                               /* file_fd = -1 */
   小冗余，但换来判断逻辑直白，属于可接受的取舍；
 - 所有 `buf_puts` / `buf_printf` 的返回值**未检查**，即 4.3.3 提到的截断风险。
 
-#### `serve_file()` 549 —— 文件响应（含 Range）
+#### `serve_file()` 557 —— 文件响应（含 Range）
 
 这是最"重"的一个函数，步骤是：`open` → 解析 Range → 拼响应头 → 移交。
 
-Range 解析（第 560 ~ 586 行）只在三个前提同时成立时才生效：
+Range 解析（第 568 ~ 594 行）只在三个前提同时成立时才生效：
 
 ```c
 range 非空  &&  strncasecmp(range, "bytes=", 6) == 0
@@ -639,9 +639,9 @@ resp_commit(c, &b, fd);                     /* fd 交给模块，由 conn_flush 
 
 **注意 `open` 后的 `fd` 所有权**：从此以后由 `http_conn_t.file_fd` 持有，
 `conn_finish` / `conn_close` 负责关闭；任何错误分支里都必须在 `resp_commit`
-之前 `close(fd)`（第 585 行的 416 分支、第 603 行的 `resp_begin` 失败分支就是这么做的）。
+之前 `close(fd)`（第 593 行的 416 分支、第 611 行的 `resp_begin` 失败分支就是这么做的）。
 
-### 4.7 请求处理层 `process_request()` 615
+### 4.7 请求处理层 `process_request()` 623
 
 这是"决策中心"，不涉及任何 I/O，纯计算 + 构造响应。执行顺序：
 
@@ -706,9 +706,9 @@ if (S_ISDIR) {
 301 那一支必须用 `c->target`（**原始 URL**，含查询串）而不是拼出来的
 文件路径，否则重定向会带上磁盘路径，既错又泄露信息。
 
-### 4.8 出口层：`http_init()` 736 与 `http_handle()` 795
+### 4.8 出口层：`http_init()` 749 与 `http_handle()` 808
 
-#### `http_init()` 736
+#### `http_init()` 749
 
 ```c
 setvbuf(stdout, NULL, _IOLBF, 0);          /* ① 日志行缓冲 */
@@ -725,7 +725,7 @@ stat + S_ISDIR 校验                          /* ⑤ 必须是目录 */
 第 ④ 步去掉末尾 `/` 是为了让后面 `snprintf("%s%s", g_root, rel)` 不会
 拼出 `//index.html`（虽然 Linux 能容忍，但 `g_root_len` 前缀比较会算错）。
 
-#### `http_handle()` 795 —— 三阶段处理
+#### `http_handle()` 808 —— 三阶段处理
 
 ```c
 if (g_root_len == 0 && http_init(NULL) < 0) return HTTP_ERR;   /* 兜底 */
@@ -753,7 +753,7 @@ if (conn_finish(c) < 0) → close;
 
 几个精妙之处：
 
-- **阶段 ② 里"发完但这次事件同时可读"**（第 811 行 `if (!(events & EPOLLIN))`）：
+- **阶段 ② 里"发完但这次事件同时可读"**（第 828 行 `if (!(events & EPOLLIN))`）：
   一次 `epoll_wait` 可能同时报告 `EPOLLOUT|EPOLLIN`（比如客户端在
   keep-alive 连接上已经流水线发了下一个请求）。发完后**不 return**，
   继续往下走读流程，避免多等一轮事件。
@@ -761,10 +761,10 @@ if (conn_finish(c) < 0) → close;
   这时根本不需要 `EPOLLOUT`，`conn_finish` 直接复位连接。
   **只有 `conn_flush` 返回 `1` 时才切到 `EPOLLOUT`**——绝大部分请求
   因此少一次 `epoll_ctl` 系统调用。
-- **`-2` 分支里把 `method`/`target` 置成 `"-"`**（第 818 ~ 819 行）：
+- **`-2` 分支里把 `method`/`target` 置成 `"-"`**（第 835 ~ 836 行）：
   否则日志里会打印上一次请求的数据（结构体在 keep-alive 上是复用的），
   看起来像是"日志串了"。
-- **兜底初始化**（第 797 行）：调用方忘了 `http_init` 也不会崩，
+- **兜底初始化**（第 810 行）：调用方忘了 `http_init` 也不会崩，
   只是默认发布 cwd。
 
 ---
@@ -803,7 +803,7 @@ if (conn_finish(c) < 0) → close;
   │                                     ├─ conn_flush() → 搬完剩余字节 → 返回 0
   │                                     ├─ conn_finish():
   │                                     │    close(文件fd)、free(hdr)、清计数
-  │                                     │    printf("[http] GET /big.bin -> 200 (keep-alive)")
+  │                                     │    log_info("GET /big.bin -> 200 (keep-alive)")
   │                                     │    keep_alive → 复位为 ST_READING、req_len=0
   │                                     │    MOD 回 EPOLLIN|ET（重新武装）
   │◄── return HTTP_OK ───────────────────┤
@@ -851,23 +851,23 @@ ET（边沿触发）只在新数据到达时报告一次。模块在发送期间
 
 | 限制 | 位置 | 影响 | 建议 |
 | --- | --- | --- | --- |
-| 不解析请求体 | `process_request` 第 641 行 | POST/上传不支持，带体请求后连接关闭 | 需要时按 `Content-Length` 消费字节后再决定 keep-alive |
-| 多区间 Range 被忽略 | `serve_file` 第 561 行 `strchr(...,',')` | `bytes=0-9,20-29` 返回 200 整文件 | 需要时实现 `multipart/byteranges` |
+| 不解析请求体 | `process_request` 第 654 行 | POST/上传不支持，带体请求后连接关闭 | 需要时按 `Content-Length` 消费字节后再决定 keep-alive |
+| 多区间 Range 被忽略 | `serve_file` 第 569 行 `strchr(...,',')` | `bytes=0-9,20-29` 返回 200 整文件 | 需要时实现 `multipart/byteranges` |
 | 目录列表超 8 KB 截断 | `resp_dir_listing` 未检查缓冲返回值 | 页面内容不全 | 调大 `HTTP_HDR_MAX` 或在溢出时返回 `500` |
-| `EPOLLHUP\|EPOLLERR` 直接关闭 | `http_handle` 第 803 行 | 极端情况下已缓冲的数据未发完 | 如需"优雅收尾"，改成"先 flush 再关" |
-| 全局单例（`g_root` 等） | 第 59 ~ 69 行 | 一个进程只能发布一个目录 | 封装成 `http_server_t` |
+| `EPOLLHUP\|EPOLLERR` 直接关闭 | `http_handle` 第 816 行 | 极端情况下已缓冲的数据未发完 | 如需"优雅收尾"，改成"先 flush 再关" |
+| 全局单例（`g_root` 等） | 第 60 ~ 70 行 | 一个进程只能发布一个目录 | 封装成 `http_server_t` |
 | 无超时 | 全靠调用方 | 慢连接可能长期占用 fd | 在调用方加 `EPOLL` 超时 / `timerfd` 踢掉空闲连接 |
 | 无 per-connection 锁 | 全局状态 | 同一个连接不能被两个线程同时处理 | 靠"一个连接只交给一个线程"的约束保证（见第 9 节） |
-| 阻塞模式下连接独占线程 | `http_serve_connection` 第 850 行 | 并发连接数受线程数限制 | 提高线程上限，或改用 one-loop-per-thread |
+| 阻塞模式下连接独占线程 | `http_serve_connection` 第 871 行 | 并发连接数受线程数限制 | 提高线程上限，或改用 one-loop-per-thread |
 | 阻塞模式必须设超时 | `pool_server.cpp` 的 `set_socket_timeout` | 未设超时时空闲 keep-alive 会永久占住线程 | 已设 SO_RCVTIMEO=5s / SO_SNDTIMEO=10s |
 
 ### 6.5 安全三重防线小结
 
 | 防线 | 位置 | 拦住的攻击 |
 | --- | --- | --- |
-| 拒绝 `%00` | `url_decode` 第 233 行 | NUL 截断绕过后续所有字符串检查 |
-| 按段拒绝 `..` | `sanitize_rel` 第 253 行 | `../../etc/passwd`、`a/../../b` |
-| `realpath` + 前缀校验 | `process_request` 第 686 ~ 693 行 | 指向外部的**符号链接**（前两道拦不住） |
+| 拒绝 `%00` | `url_decode` 第 234 行 | NUL 截断绕过后续所有字符串检查 |
+| 按段拒绝 `..` | `sanitize_rel` 第 254 行 | `../../etc/passwd`、`a/../../b` |
+| `realpath` + 前缀校验 | `process_request` 第 699 ~ 706 行 | 指向外部的**符号链接**（前两道拦不住） |
 | HTML 转义 | `resp_dir_listing` | 恶意文件名造成的目录列表 XSS |
 | `MSG_NOSIGNAL` | `conn_flush` | 对端异常关闭导致进程被 `SIGPIPE` 杀死 |
 
@@ -877,11 +877,11 @@ ET（边沿触发）只在新数据到达时报告一次。模块在发送期间
 
 | 资源 | 分配点 | 释放点 | 备注 |
 | --- | --- | --- | --- |
-| `http_conn_t` | `conn_get` 第 783 行 `calloc` | `conn_unlink` 第 337 行 | 每连接一次，keep-alive 期间复用 |
-| `g_conn` 数组 | `conn_get` 第 775 行 `realloc` | 进程退出 | 只增不减，增长到最大 fd 所需的规模 |
-| `g_conn_lock` | 静态初始化（第 69 行） | 进程退出 | 只在查表/建项/摘链时短暂持有，见 9.4 |
-| 响应缓冲 `c->hdr` | `resp_commit` 第 439 行（`buf_t` 移交） | `conn_finish` / `conn_close` 的 `free` | **每个请求一次**，是唯一的高频堆分配 |
-| 响应文件 `c->file_fd` | `serve_file` 第 552 行 `open` | `conn_finish` / `conn_close` | 必须在 `resp_commit` 之前 `close` 掉失败分支的 fd |
+| `http_conn_t` | `conn_get` 第 796 行 `calloc` | `conn_unlink` 第 338 行 | 每连接一次，keep-alive 期间复用 |
+| `g_conn` 数组 | `conn_get` 第 788 行 `realloc` | 进程退出 | 只增不减，增长到最大 fd 所需的规模 |
+| `g_conn_lock` | 静态初始化（第 70 行） | 进程退出 | 只在查表/建项/摘链时短暂持有，见 9.4 |
+| 响应缓冲 `c->hdr` | `resp_commit` 第 442 行（`buf_t` 移交） | `conn_finish` / `conn_close` 的 `free` | **每个请求一次**，是唯一的高频堆分配 |
+| 响应文件 `c->file_fd` | `serve_file` 第 560 行 `open` | `conn_finish` / `conn_close` | 必须在 `resp_commit` 之前 `close` 掉失败分支的 fd |
 | 目录列表 `names[]` | `resp_dir_listing` `strdup` | 同函数末尾逐个 `free` + `free(names)` | 即使中途 `break`，也用 `n` 计数保证只释放已分配的项 |
 | `reachable` 临时 `buf_t b` | 各 `resp_*` 栈上 | `resp_commit` 掏空 / 失败时 `free(b.p)` | 见 4.6 关于"掏空"的说明 |
 
@@ -893,11 +893,11 @@ ET（边沿触发）只在新数据到达时报告一次。模块在发送期间
 
 ## 8. 扩展指南
 
-**加一种 MIME 类型**：在 `mime_type()`（第 146 行）的表里加一行即可，
+**加一种 MIME 类型**：在 `mime_type()`（第 147 行）的表里加一行即可，
 表必须保持以 `{NULL, NULL}` 结尾。
 
-**支持新方法（如 `DELETE`）**：在 `process_request` 第 628 ~ 629 行附近
-增加判定分支，并在第 644 行的白名单处放行；注意同步修改 405 响应里的
+**支持新方法（如 `DELETE`）**：在 `process_request` 第 641 ~ 642 行附近
+增加判定分支，并在第 657 行的白名单处放行；注意同步修改 405 响应里的
 `Allow` 头。
 
 **加 `ETag` / `If-Modified-Since` 协商缓存**：在 `serve_file` 里，
@@ -951,7 +951,7 @@ pool.addTask([]{ while (1) epoll_wait(...); });   /* ← 不要这样写 */
 
 ### 9.3 两个入口的对比
 
-| | `http_handle()` 第 795 行 | `http_serve_connection()` 第 850 行 |
+| | `http_handle()` 第 808 行 | `http_serve_connection()` 第 871 行 |
 | --- | --- | --- |
 | 适用模型 | 单线程 Reactor / 多 Reactor | 线程池 + 每连接一个任务 |
 | 驱动方式 | 由 epoll 事件驱动，一次处理一段 | 内部自循环，处理完整条连接才返回 |
@@ -966,9 +966,9 @@ pool.addTask([]{ while (1) epoll_wait(...); });   /* ← 不要这样写 */
 
 | 改造 | 位置 | 原因 |
 | --- | --- | --- |
-| 连接表加锁 `g_conn_lock` | 第 69 行；`conn_get` 第 766 行、`conn_unlink` 第 328 行 | `g_conn` 是全局表，多线程会并发 `realloc`/建表项/摘链。只在"表结构"层面加锁；每个连接只由一个线程碰，所以**不需要 per-connection 锁** |
-| 拆出 `conn_unlink()` | 第 328 行 | 阻塞模式下模块"只回收状态、不关 fd、不碰 epoll"，与 `conn_close()`（epoll 模式）分离 |
-| `c->epfd < 0` 守卫 | `conn_want_write` 第 316 行、`conn_finish` 第 348 行 | 阻塞模式没有 epoll 实例，必须跳过 `epoll_ctl` |
+| 连接表加锁 `g_conn_lock` | 第 70 行；`conn_get` 第 779 行、`conn_unlink` 第 329 行 | `g_conn` 是全局表，多线程会并发 `realloc`/建表项/摘链。只在"表结构"层面加锁；每个连接只由一个线程碰，所以**不需要 per-connection 锁** |
+| 拆出 `conn_unlink()` | 第 329 行 | 阻塞模式下模块"只回收状态、不关 fd、不碰 epoll"，与 `conn_close()`（epoll 模式）分离 |
+| `c->epfd < 0` 守卫 | `conn_want_write` 第 317 行、`conn_finish` 第 349 行 | 阻塞模式没有 epoll 实例，必须跳过 `epoll_ctl` |
 
 > 另外 `http.h` 加了 **`extern "C"` 保护**（第 9 ~ 11 行 / 第 61 ~ 63 行）。
 > 这不是可选项：C++ 源文件（如 `pool_server.cpp`）include `http.h` 时，
@@ -1023,7 +1023,7 @@ pool.addTask([cfd]{                             /* ★ 一整条连接 = 一个�
 set_socket_timeout(cfd, 5, 10);   /* SO_RCVTIMEO=5s, SO_SNDTIMEO=10s */
 ```
 
-对应地，`conn_read()`（第 397 行）在阻塞套接字上读到超时会拿到
+对应地，`conn_read()`（第 400 行）在阻塞套接字上读到超时会拿到
 `EAGAIN`，于是返回 `0`，`http_serve_connection()` 的循环据此退出并关闭连接——
 空闲的 keep-alive 连接最多占住线程 5 秒。
 
@@ -1041,40 +1041,40 @@ set_socket_timeout(cfd, 5, 10);   /* SO_RCVTIMEO=5s, SO_SNDTIMEO=10s */
 
 | 行号 | 函数 | 职责 | 返回值约定 |
 | --- | --- | --- | --- |
-| 76 | `buf_reserve` | 保证缓冲容量 | `0` / `-1` |
-| 89 | `buf_add` | 追加字节 | `0` / `-1` |
-| 99 | `buf_puts` | 追加字符串 | `0` / `-1` |
-| 101 | `buf_printf` | 格式化追加 | `0` / `-1` |
-| 121 | `http_date` | GMT 时间串 | — |
-| 128 | `status_text` | 状态码 → 短语 | — |
-| 146 | `mime_type` | 扩展名 → MIME | — |
-| 188 | `html_escape` | HTML 实体转义 | — |
-| 203 | `url_encode` | 路径段百分号编码 | — |
-| 221 | `url_decode` | 百分号解码 | 长度 / `-1` |
-| 242 | `sanitize_rel` | 路径规范化 + 拒 `..` | `0` / `-1` |
-| 268 | `header_get` | 取请求头字段 | `1` / `0` |
-| 296 | `find_header_end` | 头部是否收全 | 偏移（`0`=未全） |
-| 316 | `conn_want_write` | 切到 `EPOLLOUT`（阻塞模式空实现） | — |
-| 328 | `conn_unlink` | 摘链 + 释放连接状态（不碰 fd） | — |
-| 340 | `conn_close` | `conn_unlink` + epoll `DEL` + `close(fd)` | — |
-| 348 | `conn_finish` | 响应收尾 / keep-alive 复位 | `0` / `-1` |
-| 377 | `conn_flush` | 非阻塞发送头 + 文件 | `1` 未完 / `0` 完成 / `-1` 错 |
-| 397 | `conn_read` | ET 循环收请求 | `1`/`0`/`-1`/`-2` |
-| 420 | `resp_begin` | 拼响应行与公共头 | `0` / `-1` |
-| 437 | `resp_commit` | 移交缓冲 → 进入发送态 | — |
-| 449 | `resp_memory` | 内存型响应 | — |
-| 459 | `resp_error` | 错误页 | — |
-| 473 | `human_size` | 大小美化 | — |
-| 483 | `cmp_str` | `qsort` 比较器 | — |
-| 488 | `resp_dir_listing` | 目录列表页 | — |
-| 549 | `serve_file` | 静态文件 + Range | — |
-| 615 | `process_request` | 请求解析与分派 | — |
-| 736 | **`http_init`** | 设定根目录 | `0` / `-1` |
-| 762 | **`http_set_verbose`** | 日志开关 | — |
-| 764 | **`http_root`** | 查询根目录 | 路径 / `NULL` |
-| 766 | `conn_get` | 取/建连接状态（内部加锁） | 指针 / `NULL` |
-| 795 | **`http_handle`** | epoll 模式入口：一次事件处理一段 | `HTTP_OK` / `HTTP_ERR` |
-| 850 | **`http_serve_connection`** | 阻塞模式入口：处理完整条连接 | `0`（调用方负责 `close`） |
+| 77 | `buf_reserve` | 保证缓冲容量 | `0` / `-1` |
+| 90 | `buf_add` | 追加字节 | `0` / `-1` |
+| 100 | `buf_puts` | 追加字符串 | `0` / `-1` |
+| 102 | `buf_printf` | 格式化追加 | `0` / `-1` |
+| 122 | `http_date` | GMT 时间串 | — |
+| 129 | `status_text` | 状态码 → 短语 | — |
+| 147 | `mime_type` | 扩展名 → MIME | — |
+| 189 | `html_escape` | HTML 实体转义 | — |
+| 204 | `url_encode` | 路径段百分号编码 | — |
+| 222 | `url_decode` | 百分号解码 | 长度 / `-1` |
+| 243 | `sanitize_rel` | 路径规范化 + 拒 `..` | `0` / `-1` |
+| 269 | `header_get` | 取请求头字段 | `1` / `0` |
+| 297 | `find_header_end` | 头部是否收全 | 偏移（`0`=未全） |
+| 317 | `conn_want_write` | 切到 `EPOLLOUT`（阻塞模式空实现） | — |
+| 329 | `conn_unlink` | 摘链 + 释放连接状态（不碰 fd） | — |
+| 341 | `conn_close` | `conn_unlink` + epoll `DEL` + `close(fd)` | — |
+| 349 | `conn_finish` | 响应收尾 / keep-alive 复位 | `0` / `-1` |
+| 380 | `conn_flush` | 非阻塞发送头 + 文件 | `1` 未完 / `0` 完成 / `-1` 错 |
+| 400 | `conn_read` | ET 循环收请求 | `1`/`0`/`-1`/`-2` |
+| 423 | `resp_begin` | 拼响应行与公共头 | `0` / `-1` |
+| 440 | `resp_commit` | 移交缓冲 → 进入发送态 | — |
+| 452 | `resp_memory` | 内存型响应 | — |
+| 462 | `resp_error` | 错误页 | — |
+| 481 | `human_size` | 大小美化 | — |
+| 491 | `cmp_str` | `qsort` 比较器 | — |
+| 496 | `resp_dir_listing` | 目录列表页 | — |
+| 557 | `serve_file` | 静态文件 + Range | — |
+| 623 | `process_request` | 请求解析与分派 | — |
+| 749 | **`http_init`** | 设定根目录 | `0` / `-1` |
+| 775 | **`http_set_verbose`** | 日志开关 | — |
+| 777 | **`http_root`** | 查询根目录 | 路径 / `NULL` |
+| 779 | `conn_get` | 取/建连接状态（内部加锁） | 指针 / `NULL` |
+| 808 | **`http_handle`** | epoll 模式入口：一次事件处理一段 | `HTTP_OK` / `HTTP_ERR` |
+| 871 | **`http_serve_connection`** | 阻塞模式入口：处理完整条连接 | `0`（调用方负责 `close`） |
 
 （加粗为对外接口，共 5 个；其余 29 个均为 `static`。`http.h` 中的声明位置：
 `http_init` 第 39 行、`http_handle` 第 43 行、`http_set_verbose` 第 46 行、

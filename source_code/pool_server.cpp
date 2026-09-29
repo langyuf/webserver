@@ -26,6 +26,7 @@
 #include "pool_server.h"
 #include "http.h"
 #include "threadpool.h"
+#include "logger.h"
 
 /* C++ 标准库 */
 #include <atomic>   /* std::atomic */
@@ -54,7 +55,11 @@ int listen_blocking(unsigned short port)
     signal(SIGPIPE, SIG_IGN);
 
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) { perror("socket"); return -1; }
+    if (lfd < 0) {
+        log_error("socket 创建失败: %s", strerror(errno));
+        perror("socket");
+        return -1;
+    }
 
     int opt = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -66,11 +71,13 @@ int listen_blocking(unsigned short port)
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        log_error("bind 端口 %u 失败: %s", port, strerror(errno));
         perror("bind");
         close(lfd);
         return -1;
     }
     if (listen(lfd, 128) < 0) {
+        log_error("listen 失败: %s", strerror(errno));
         perror("listen");
         close(lfd);
         return -1;
@@ -108,33 +115,49 @@ int pool_run(unsigned short port, int min, int max)
     sigaction(SIGINT,  &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
 
-    ThreadPool pool(min, max);
-
     printf("线程池模式已启动\n");
     printf("  端口      : %u\n", port);
     printf("  工作线程  : %d ~ %d\n", min, max);
     printf("  网站根目录: %s\n", http_root() ? http_root() : "(未设置)");
     printf("按 Ctrl+C 退出\n");
+    log_info("服务器启动: 模式=线程池(%d~%d 线程) 端口=%u 根目录=%s",
+             min, max, port, http_root() ? http_root() : "(未设置)");
 
-    while (!g_stop) {
-        int cfd = accept(lfd, nullptr, nullptr);
-        if (cfd < 0) {
-            if (errno == EINTR) continue;   /* 被信号打断 -> 回到 while 判断 g_stop */
-            if (g_stop) break;
-            perror("accept");
-            break;
+    {
+        /* 线程池放在这个作用域里: 出作用域即析构,
+         * 析构会等所有任务跑完 -> 通知线程退出 -> join 回收。 */
+        ThreadPool pool(min, max);
+
+        while (!g_stop) {
+            struct sockaddr_in peer;
+            socklen_t peerlen = sizeof(peer);
+            int cfd = accept(lfd, reinterpret_cast<sockaddr*>(&peer), &peerlen);
+            if (cfd < 0) {
+                if (errno == EINTR) continue;   /* 被信号打断 -> 回到 while 判断 g_stop */
+                if (g_stop) break;
+                log_error("accept 失败: %s", strerror(errno));
+                perror("accept");
+                break;
+            }
+            set_socket_timeout(cfd, 5, 10);
+
+            /* 【日志点 1/4 · accept】记录新接入的连接 */
+            char ip[INET_ADDRSTRLEN] = {0};
+            inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+            log_info("accept fd=%d 来自 %s:%d", cfd, ip, ntohs(peer.sin_port));
+
+            /* ★ 关键一步: 把"一整条连接"作为任务交给线程池。
+             *   按值捕获 cfd, 任务的生存期完全由线程池管理。 */
+            pool.addTask([cfd] {
+                http_serve_connection(cfd);     /* 阻塞式处理完整条连接(含 keep-alive) */
+                close(cfd);
+            });
         }
-        set_socket_timeout(cfd, 5, 10);
+    }   /* ← ThreadPool 在这里析构完毕 */
 
-        /* ★ 关键一步: 把"一整条连接"作为任务交给线程池。
-         *   按值捕获 cfd, 任务的生存期完全由线程池管理。 */
-        pool.addTask([cfd] {
-            http_serve_connection(cfd);     /* 阻塞式处理完整条连接(含 keep-alive) */
-            close(cfd);
-        });
-    }
-
+    /* 【日志点 4/4 · 退出】 */
     close(lfd);
-    printf("\n收到退出信号, 等待剩余任务完成后关闭线程池...\n");
-    return 0;   /* pool 析构: 等任务做完 -> 通知所有线程退出 -> join 回收 */
+    printf("\n收到退出信号, 线程池已关闭\n");
+    log_info("收到退出信号, 线程池已关闭, 服务器退出");
+    return 0;
 }

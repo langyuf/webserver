@@ -4,6 +4,7 @@
  * ===================================================================== */
 #define _GNU_SOURCE
 #include "http.h"
+#include "logger.h"   /* 日志点 2/4 与 3/4 */
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -353,9 +354,11 @@ static int conn_finish(http_conn_t *c)
     c->hdr_len = c->hdr_sent = 0;
     c->file_off = c->file_remain = 0;
 
+    /* 【日志点 2/4 · 请求完成】一次请求的最终结果写进访问日志。
+     * 仍受 http_set_verbose() 控制(默认开)。 */
     if (g_verbose)
-        printf("[http] %s %s -> %d%s\n", c->method, c->target, c->status,
-               c->keep_alive ? " (keep-alive)" : "");
+        log_info("%s %s -> %d%s", c->method, c->target, c->status,
+                 c->keep_alive ? " (keep-alive)" : "");
 
     if (!c->keep_alive) return -1;
 
@@ -467,6 +470,11 @@ static void resp_error(http_conn_t *c, int code, const char *msg, const char *ex
                       code, msg, code, msg);
     if (n < 0) n = 0;
     if ((size_t)n > sizeof(body)) n = (int)sizeof(body);
+
+    /* 【日志点 3/4 · 出错】产生错误响应(4xx)时记一条 WARN,
+     * 便于事后排查是谁在扫目录、谁的请求格式不对。 */
+    log_warn("响应 %d %s: %s %s (fd=%d)", code, msg, c->method, c->target, c->fd);
+
     resp_memory(c, code, "text/html; charset=utf-8", body, (size_t)n, extra);
 }
 
@@ -615,6 +623,11 @@ static void serve_file(http_conn_t *c, const char *fs_path,
 static void process_request(http_conn_t *c)
 {
     char method[16] = {0}, target[2048] = {0}, version[16] = {0};
+
+    /* 先置成占位值: 结构体在 keep-alive 上是复用的, 若解析失败(400),
+     * resp_error() 的日志会打印这两个字段, 不清空就会带上一次请求的内容。 */
+    snprintf(c->method, sizeof(c->method), "-");
+    snprintf(c->target, sizeof(c->target), "-");
 
     if (sscanf(c->req, "%15s %2047s %15s", method, target, version) != 3) {
         c->keep_alive = 0;
@@ -805,7 +818,11 @@ int http_handle(int epfd, int fd, uint32_t events)
     /* 1. 上次没发完, 继续发 */
     if (c->state == ST_SENDING) {
         int r = conn_flush(c);
-        if (r < 0) { conn_close(c); return HTTP_ERR; }
+        if (r < 0) {
+            log_error("发送响应失败 fd=%d: %s", c->fd, strerror(errno));
+            conn_close(c);
+            return HTTP_ERR;
+        }
         if (r == 1) { conn_want_write(c); return HTTP_OK; }
         if (conn_finish(c) < 0) { conn_close(c); return HTTP_ERR; }
         if (!(events & EPOLLIN)) return HTTP_OK;
@@ -830,7 +847,11 @@ int http_handle(int epfd, int fd, uint32_t events)
 
     /* 3. 立刻尝试发送, 发不完就等 EPOLLOUT */
     int f = conn_flush(c);
-    if (f < 0) { conn_close(c); return HTTP_ERR; }
+    if (f < 0) {
+        log_error("发送响应失败 fd=%d: %s", c->fd, strerror(errno));
+        conn_close(c);
+        return HTTP_ERR;
+    }
     if (f == 1) { conn_want_write(c); return HTTP_OK; }
     if (conn_finish(c) < 0) { conn_close(c); return HTTP_ERR; }
     return HTTP_OK;
@@ -871,7 +892,10 @@ int http_serve_connection(int fd)
             process_request(c);
         }
 
-        if (conn_flush(c) < 0) break;   /* 发送失败 */
+        if (conn_flush(c) < 0) {        /* 发送失败 */
+            log_error("发送响应失败 fd=%d: %s", c->fd, strerror(errno));
+            break;
+        }
         if (conn_finish(c) < 0) break;  /* 非 keep-alive: 收工 */
     }
 

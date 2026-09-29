@@ -31,23 +31,7 @@ struct Task
     }
 };
 
-/*
- * 旧版 Task 定义（保留作对照，不再使用）。
- * 旧版需要用函数指针 + void*，并且 worker 里要 delete task.arg，
- * 这会导致“参数到底归谁所有”很难说清楚。
- *
-struct Task
-{
-    Task() { function = nullptr; arg = nullptr; }
-    Task(void(*f)(void*), void* arg)
-    {
-        function = f;
-        this->arg = arg;
-    }
-    void(*function)(void*);
-    void* arg;
-};
- */
+
 
 // 任务队列：负责保存任务，并用互斥锁保证多线程访问安全。
 class TaskQueue

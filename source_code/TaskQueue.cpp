@@ -23,21 +23,7 @@ void TaskQueue::addTask(TaskFunction func)
     m_queue.push(Task(std::move(func)));
 }
 
-/*
- * 旧版 addTask(callback, void*) 实现，保留作对照。
- * 旧版把参数当成裸指针，线程池执行完后必须 delete，所有权很不清晰。
- * 加锁方式也从 pthread_mutex_lock/unlock 换成了 std::lock_guard。
- *
-void TaskQueue::addTask(callback func, void* arg)
-{
-    pthread_mutex_lock(&m_mutex);
-    Task task;
-    task.function = func;
-    task.arg = arg;
-    m_queue.push(task);
-    pthread_mutex_unlock(&m_mutex);
-}
- */
+
 
 Task TaskQueue::takeTask()
 {
