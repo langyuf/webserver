@@ -61,6 +61,16 @@ POST /           -> 405  Allow: GET, HEAD
   防止目录穿越与符号链接逃逸；拒绝 `%00`；
 - 错误页：`400 / 403 / 404 / 405 / 413 / 414 / 416`。
 
+**日志**
+
+- 单例 `Logger`（内部 `std::mutex` + 两个 `std::ofstream`），
+  **访问日志与错误日志分开写**：`info` → `access.log`，`warn` / `error` → `error.log`；
+- 每行格式 `时间 [级别] [tid] 消息`；`[tid]` 在多线程下能看出请求由哪个工作线程处理；
+- 四个埋点：**accept、请求完成、出错、退出**（详见第 6 节）；
+- C++ 代码直接用 `Logger::instance()`，C 代码走 `extern "C"` 包装
+  （`log_info` / `log_warn` / `log_error`）；
+- 日志打不开只静默跳过，不会因为日志把服务器搞崩。
+
 > 请求体（POST）、chunked 编码、HTTPS 未实现。若请求携带请求体，
 > 响应后会主动关闭连接，避免 keep-alive 解析错位。
 
@@ -70,8 +80,8 @@ POST /           -> 405  Allow: GET, HEAD
 
 ```
 Linux/
-├── doc/                文档
-│   ├── README.md           本文件（项目说明、编译运行、两种并发模型）
+├── README.md           本文件（项目说明、编译运行、两种并发模型、日志系统）
+├── doc/
 │   └── HTTP.md             http.c / http.h 的逐层代码详解
 ├── source_code/        源码 + 构建脚本（自包含，可独立编译）
 │   ├── Makefile            混合构建：C 用 gcc，C++ 用 g++，统一 g++ 链接
@@ -81,6 +91,7 @@ Linux/
 │   ├── pool_server.h/.cpp  线程池接入层（main.c 与 ThreadPool 之间的桥）
 │   ├── TaskQueue.h/.cpp    任务队列（std::queue + std::mutex，C++11）
 │   ├── threadpool.h/.cpp   线程池（工作线程 + 管理线程，动态扩缩容）
+│   ├── logger.h/.cpp       日志系统(单例 + std::mutex + 两个 ofstream)
 │   ├── client.c            配套 TCP 测试客户端（与 HTTP 模块无关）
 │   ├── s                   服务器可执行文件（编译产物）
 │   └── c                   客户端可执行文件（编译产物）
@@ -89,7 +100,7 @@ Linux/
 ```
 
 > `source_code/` 是自包含的：源码、`Makefile`、编译产物都在里面，
-> 可以整个目录拷走单独编译。文档在 `doc/`。
+> 可以整个目录拷走单独编译。代码详解在 `doc/HTTP.md`。
 >
 > 因此下面**编译相关命令要先 `cd source_code`**；运行服务器可以
 > `cd source_code && ./s ...`，也可以直接在仓库根目录写
@@ -205,6 +216,8 @@ curl -i  -r 0-99 http://127.0.0.1:8989/big.bin # Range，期望 206
 curl -i  http://127.0.0.1:8989/sub            # 目录，期望 301
 curl -o /dev/null -w '%{http_code}\n' \
         --path-as-is http://127.0.0.1:8989/../../etc/passwd   # 期望 403
+
+tail -f access.log error.log    # 实时观察日志(文件在进程的 cwd)
 ```
 
 ---
@@ -341,16 +354,62 @@ int pool_run(unsigned short port, int min, int max);
 
 ---
 
-## 6. 访问日志
+## 6. 日志系统
+
+`source_code/logger.h` / `logger.cpp` 提供了一个最简单的日志系统：
+
+- **单例** `Logger`（函数内 `static` 局部变量，C++11 保证初始化线程安全）；
+- 内部一把 `std::mutex` 保护两个 `std::ofstream`；
+- **两个文件**：访问日志 `access.log`（`info`）与错误日志 `error.log`（`warn` / `error`）；
+- 每行格式：`时间 [级别] [tid] 消息`。
 
 ```
-[http] GET /                     -> 200 (keep-alive)
-[http] GET /style.css            -> 200 (keep-alive)
-[http] GET /big.bin              -> 206 (keep-alive)
-[http] GET /../../secret.txt     -> 403
+2026-09-29 08:13:23.100 [INFO]  [140348526143296] accept fd=7 来自 127.0.0.1:46636
+2026-09-29 08:13:23.101 [INFO]  [140348526143296] GET / -> 200 (keep-alive)
+2026-09-29 08:13:23.107 [INFO]  [140348526143296] GET /big.bin -> 206 (keep-alive)
+2026-09-29 08:13:23.122 [INFO]  [140348526143296] 收到退出信号, 服务器已退出
 ```
 
-日志做了行缓冲，即使 `./s ... > server.log` 重定向到文件也能实时看到。
+错误日志：
+
+```
+2026-09-29 08:13:23.114 [WARN]  [140348526143296] 响应 404 Not Found: GET /nope (fd=7)
+2026-09-29 08:13:23.120 [WARN]  [140348526143296] 响应 403 Forbidden: GET /../../etc/passwd (fd=7)
+```
+
+`[tid]` 在多线程下很有用——线程池模式里能直接看出同一个请求是由哪个工作线程处理的。
+
+### 埋点位置
+
+| # | 位置 | 级别 | 代码位置 |
+| --- | --- | --- | --- |
+| 1 | 接受新连接 | `INFO` | `server.c` 的 `new_connection()` / `pool_server.cpp` 的 accept 循环 |
+| 2 | 请求处理完成 | `INFO` | `http.c` 的 `conn_finish()`（受 `http_set_verbose()` 控制，默认开） |
+| 3 | 出错 | `WARN` / `ERROR` | `http.c` 的 `resp_error()`（4xx 响应）、发送失败处；`server.c`/`pool_server.cpp` 的 accept 失败 |
+| 4 | 退出 | `INFO` | `epollRun()` / `pool_run()` 收到 SIGINT/SIGTERM 后的收尾处 |
+
+### 用法
+
+```c
+/* C 代码(http.c / server.c 是 C, 只能走这组 extern "C" 包装) */
+log_init("access.log", "error.log");   /* 传 NULL 用默认路径 */
+log_info ("accept fd=%d", cfd);
+log_warn ("响应 %d %s", 404, "Not Found");
+log_error("发送失败: %s", strerror(errno));
+```
+
+```cpp
+/* C++ 代码可以直接用类 */
+Logger::instance().info("hello");
+```
+
+**两个刻意为之的设计**：
+
+- 日志文件打不开时**只静默跳过**，绝不因为日志把服务器搞崩；
+- 每行都 `flush`（用 `std::endl`），方便 `tail -f` 实时观察；
+  代价是高频写盘，生产环境可以改成攒够若干条再 flush。
+
+日志文件会在**进程的 cwd** 生成，已加入 `.gitignore`（`*.log`）。
 
 ---
 
@@ -382,12 +441,17 @@ int pool_run(unsigned short port, int min, int max);
 - **大文件完整性**：1MB 文件整取与 `--limit-rate 200k` 慢速读取，
   md5 均与源文件一致（即 `EPOLLOUT` 分片续传路径正确）；
 - **keep-alive**：同一条 TCP 连接内连续请求 `/` 与 `/style.css`，
-  客户端报告连接被复用（`left intact`）。- **线程池模式**：20 个并发慢速下载（各 1MB、限速 100KB/s，`min=2 max=8`），
+  客户端报告连接被复用（`left intact`）；
+- **线程池模式**：20 个并发慢速下载（各 1MB、限速 100KB/s，`min=2 max=8`），
   线程数自动 `4 → 6 → 8` 扩容，20 份下载 md5 全部与源文件一致；
-  空闲后自动 `8 → 6 → 4` 缩容，最终回落到 `min=2`。
+  空闲后自动 `8 → 6 → 4` 缩容，最终回落到 `min=2`；
+- **日志系统**：两种模式下四个埋点全部落盘，`access.log` / `error.log` 分文件正确；
+  线程池模式下 `[tid]` 能区分不同工作线程；
+  并发压测：4 线程各写 100 条（共 400 条）**无一行交错、无一行格式不符**；
 - **日志并发安全**：`threadExit()` 等日志已改为"整行拼好 + 加锁一次输出"，
-  多线程缩容时不再出现 `threadExit(): thread threadExit(): thread 123...123... exiting exiting` 这种交错。
-
+  多线程缩容时不再出现 `threadExit(): thread threadExit(): thread 123...123... exiting exiting` 这种交错；
+- **编译**：7 个源文件在 `-Wall -Wextra`（C 用 `-std=c11`、C++ 用 `-std=c++11`）下**零警告**，
+  `make` 零警告零错误。
 
 ---
 
@@ -410,6 +474,7 @@ int pool_run(unsigned short port, int min, int max);
 
 - ~~`server.c` 中的 `Communication()` / `is_http_request()` 死代码~~ —— 已删除；
 - ~~`server.h` 里 `static` 声明导致的编译警告~~ —— 已删除；
+- 日志没有滚动/清理策略，长期运行会一直增大；也没有异步落盘（每条都 flush）；
 - `server.c` 的 `epollRun()` 里还有一句 `printf("num = %d\n", num)` 调试输出，
   每轮 `epoll_wait` 都会打印一次，需要时可去掉。
 
