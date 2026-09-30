@@ -81,6 +81,8 @@ POST /           -> 405  Allow: GET, HEAD
 ```
 Linux/
 ├── README.md           本文件（项目说明、编译运行、两种并发模型、日志系统）
+├── CMakeLists.txt      CMake 构建脚本（与 Makefile 等效，推荐 out-of-source）
+├── build/              构建目录（cmake 产物，已被 .gitignore 忽略）
 ├── doc/
 │   └── HTTP.md             http.c / http.h 的逐层代码详解
 ├── source_code/        源码 + 构建脚本（自包含，可独立编译）
@@ -153,6 +155,28 @@ make            # 推荐: 产出 source_code/s
 make client     # 单独编译 TCP 测试客户端, 产出 source_code/c
 make clean      # 清理 .o 与可执行文件
 ```
+
+### 编译（CMake）
+
+仓库根目录的 `CMakeLists.txt` 与 `Makefile` 完全等价（C 走 gcc、C++ 走 g++、
+C++ 链接器收尾），源码目录保持自包含，构建产物全部落在 `build/`，不污染源码：
+
+```bash
+cmake -S . -B build              # 配置(首次生成 build/CMakeCache.txt)
+cmake --build build -j           # 编译: 产出 build/s 和 build/c
+cmake --build build --target s   # 只编译 HTTP 服务器
+cmake --build build --target c   # 只编译 TCP 测试客户端
+```
+
+需要调试符号时用 `-DCMAKE_BUILD_TYPE=Debug`（缺省 Release）：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j
+```
+
+> 运行产物在 `build/` 里，所以启动命令相应改成 `./build/s 8989 /var/www/html`；
+> 日志仍写到**进程 cwd**，与 Makefile 构建的版本行为一致。
+> 换台机器重新编译时不要拷贝 `build/`，删掉后重新 `cmake -S . -B build` 即可。
 
 等价的**分编译器手工构建**——按扩展名分工即可，不需要任何特殊开关：
 
